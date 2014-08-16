@@ -164,12 +164,17 @@ struct drm_device *drm_init(const char *name)
 		}
 	}
 
+	dev.crtc = drmModeGetCrtc(dev.fd, dev.crtc_id);
+	assert(dev.crtc);
+
 	return &dev;
 }
 
 void drm_deinit(struct drm_device *dev)
 {
 	assert(dev);
+
+	drmModeFreeCrtc(dev->crtc);
 
 	{
 		munmap(dev->buf.map, dev->buf.size);
@@ -205,9 +210,6 @@ int main(int argc, char *argv[])
 	printf("Name: %s\n", dev->version->name);
 	printf("Description: %s\n", dev->version->desc);
 
-	dev->crtc = drmModeGetCrtc(dev->fd, dev->crtc_id);
-	assert(dev->crtc);
-
 	int res = drmModeSetCrtc(
 		dev->fd,
 		dev->crtc_id,
@@ -239,8 +241,6 @@ int main(int argc, char *argv[])
 		&dev->connector->connector_id,
 		1,
 		&dev->crtc->mode);
-
-	drmModeFreeCrtc(dev->crtc);
 
 	drm_deinit(dev);
 
