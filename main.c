@@ -31,6 +31,36 @@ struct drm_device {
 	struct drm_buf buf;
 };
 
+void drm_colorize(struct drm_device *dev)
+{
+	static int16_t n = 0;
+	static uint8_t d = 0;
+
+	if (d) {
+		if (++n > 255) {
+			d ^= 1;
+			n -= 2;
+		}
+	}
+	else {
+		if (--n < 0) {
+			d ^= 1;
+			n += 2;
+		}
+	}
+/*
+	time_t t;
+	srand(time(&t));
+	uint8_t r = rand() % 0xff, g = rand() % 0xff, b = rand() % 0xff;
+*/
+	uint8_t r = 0, g = 0, b = n;
+
+	for (int i = 0; i < dev->buf.height; i++)
+		for (int j = 0; j < dev->buf.width; j++)
+			*(uint32_t *)&dev->buf.map[dev->buf.stride * i + j * 4] =
+				(r << 16) | (g << 8) | b;
+}
+
 struct drm_device *drm_init(const char *name)
 {
 	static struct drm_device dev = { 0 };
@@ -152,16 +182,6 @@ struct drm_device *drm_init(const char *name)
 		assert(dev.buf.map != MAP_FAILED);
 
 		memset(dev.buf.map, 0, dev.buf.size);
-
-		{
-			time_t t;
-			srand(time(&t));
-			uint8_t r = rand() % 0xff, g = rand() % 0xff, b = rand() % 0xff;
-			for (int i = 0; i < dev.buf.height; i++)
-				for (int j = 0; j < dev.buf.width; j++)
-					*(uint32_t *)&dev.buf.map[dev.buf.stride * i + j * 4] =
-						(r << 16) | (g << 8) | b;
-		}
 	}
 
 	dev.crtc = drmModeGetCrtc(dev.fd, dev.crtc_id);
@@ -194,6 +214,24 @@ void drm_deinit(struct drm_device *dev)
 	close(dev->fd);
 }
 
+void page_flip_handler(
+	int fd,
+	unsigned int sequence,
+	unsigned int tv_sec,
+	unsigned int tv_usec,
+	void *user_data)
+{
+	struct drm_device *dev = (struct drm_device *)user_data;
+
+	drm_colorize(dev);
+	drmModePageFlip(
+		dev->fd,
+		dev->crtc_id,
+		dev->buf.fb,
+		DRM_MODE_PAGE_FLIP_EVENT,
+		dev);
+}
+
 int main(int argc, char *argv[])
 {
 	const char name[] = "/dev/dri/card0";
@@ -221,16 +259,48 @@ int main(int argc, char *argv[])
 		dev->mode);
 	assert(res == 0);
 
-	res = drmModePageFlip(
+	drm_colorize(dev);
+	drmModePageFlip(
 		dev->fd,
 		dev->crtc_id,
 		dev->buf.fb,
 		DRM_MODE_PAGE_FLIP_EVENT,
-		0);
-	printf("res = %d\n", res);
+		dev);
 
-	printf("Press <enter> to continue.\n");
-	getchar();
+	fd_set fds;
+	FD_ZERO(&fds);
+
+	drmEventContext ev = {
+		DRM_EVENT_CONTEXT_VERSION,
+		0,
+		page_flip_handler
+	};
+
+	const long double nsec = 1000000000;
+	struct timespec t1, t2;
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+
+	while (1) {
+		FD_SET(0, &fds);
+		FD_SET(dev->fd, &fds);
+
+		res = select(dev->fd + 1, &fds, 0, 0, 0);
+		assert(res >= 0);
+
+		if (FD_ISSET(0, &fds))
+			break;
+		else if (FD_ISSET(dev->fd, &fds))
+			drmHandleEvent(dev->fd, &ev);
+
+		{
+			struct timespec t3 = t2;
+			clock_gettime(CLOCK_MONOTONIC, &t2);
+			long double e1 = t2.tv_sec - t1.tv_sec + (t2.tv_nsec - t1.tv_nsec) / nsec;
+			long double e2 = t2.tv_sec - t3.tv_sec + (t2.tv_nsec - t3.tv_nsec) / nsec;
+			fprintf(stdout, "%.9Lf, %.9Lf        \r", e1, 1 / e2);
+			fflush(stdout);
+		}
+	}
 
 	res = drmModeSetCrtc(
 		dev->fd,
