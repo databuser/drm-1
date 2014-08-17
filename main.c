@@ -105,6 +105,16 @@ void drm_create_buf(struct drm_device *dev, uint8_t n)
 	memset(dev->buf[n].map, 0, dev->buf[n].size);
 }
 
+void drm_destroy_buf(struct drm_device *dev, uint8_t n)
+{
+	munmap(dev->buf[n].map, dev->buf[n].size);
+	drmModeRmFB(dev->fd, dev->buf[n].fb);
+
+	struct drm_mode_destroy_dumb dreq = { 0 };
+	dreq.handle = dev->buf[n].handle;
+	drmIoctl(dev->fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dreq);
+}
+
 struct drm_device *drm_init(const char *name)
 {
 	static struct drm_device dev = { 0 };
@@ -201,13 +211,8 @@ void drm_deinit(struct drm_device *dev)
 
 	drmModeFreeCrtc(dev->crtc);
 
-	for (int i = 0; i < sizeof(dev->buf) / sizeof(struct drm_buf); i++) {
-		munmap(dev->buf[i].map, dev->buf[i].size);
-		drmModeRmFB(dev->fd, dev->buf[i].fb);
-		struct drm_mode_destroy_dumb dreq = { 0 };
-		dreq.handle = dev->buf[i].handle;
-		drmIoctl(dev->fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dreq);
-	}
+	for (int i = 0; i < sizeof(dev->buf) / sizeof(struct drm_buf); i++)
+		drm_destroy_buf(dev, i);
 
 	assert(dev->connector);
 	drmModeFreeConnector(dev->connector);
@@ -319,7 +324,7 @@ int main(int argc, char *argv[])
 		++f;
 	}
 
-	res = drmModeSetCrtc(
+	drmModeSetCrtc(
 		dev->fd,
 		dev->crtc->crtc_id,
 		dev->crtc->buffer_id,
