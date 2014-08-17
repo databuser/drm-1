@@ -1,5 +1,5 @@
 CFLAGS=-g -c -std=c99 -Wall -m64 -Ofast -flto -march=native -funroll-loops -DLINUX -I/usr/include/libdrm
-LDFLAGS=-ldrm
+LDFLAGS=-ldrm -lgbm -lEGL -lGLESv2
 SRCS=main.c
 OBJS=$(SRCS:.c=.o)
 TARGET=drm-1
