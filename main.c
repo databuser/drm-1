@@ -28,10 +28,11 @@ struct drm_device {
 	drmModeModeInfo *mode;
 	drmModeCrtc *crtc;
 	uint32_t crtc_id;
-	struct drm_buf buf;
+	uint8_t front_buf;
+	struct drm_buf buf[2];
 };
 
-void drm_colorize(struct drm_device *dev)
+void drm_colorize(struct drm_device *dev, uint8_t x)
 {
 	static int16_t n = 0;
 	static uint8_t d = 0;
@@ -53,12 +54,55 @@ void drm_colorize(struct drm_device *dev)
 	srand(time(&t));
 	uint8_t r = rand() % 0xff, g = rand() % 0xff, b = rand() % 0xff;
 */
-	uint8_t r = 0, g = 0, b = n;
+	uint8_t r = n, g = n, b = n;
 
-	for (int i = 0; i < dev->buf.height; i++)
-		for (int j = 0; j < dev->buf.width; j++)
-			*(uint32_t *)&dev->buf.map[dev->buf.stride * i + j * 4] =
+	for (int i = 0; i < dev->buf[x].height; i++)
+		for (int j = 0; j < dev->buf[x].width; j++)
+			*(uint32_t *)&dev->buf[x].map[dev->buf[x].stride * i + j * 4] =
 				(r << 16) | (g << 8) | b;
+}
+
+void drm_create_buf(struct drm_device *dev, uint8_t n)
+{
+	struct drm_mode_create_dumb creq = { 0 };
+	creq.width = dev->mode->hdisplay;
+	creq.height = dev->mode->vdisplay;
+	creq.bpp = 32;
+	int res = drmIoctl(dev->fd, DRM_IOCTL_MODE_CREATE_DUMB, &creq);
+	assert(res >= 0);
+
+	dev->buf[n].width = creq.width;
+	dev->buf[n].height = creq.height;
+	dev->buf[n].stride = creq.pitch;
+	dev->buf[n].size = creq.size;
+	dev->buf[n].handle = creq.handle;
+
+	res = drmModeAddFB(
+		dev->fd,
+		creq.width,
+		creq.height,
+		24,
+		32,
+		creq.pitch,
+		creq.handle,
+		&dev->buf[n].fb);
+	assert(res == 0);
+
+	struct drm_mode_map_dumb mreq = { 0 };
+	mreq.handle = creq.handle;
+	res = drmIoctl(dev->fd, DRM_IOCTL_MODE_MAP_DUMB, &mreq);
+	assert(res == 0);
+
+	dev->buf[n].map = mmap(
+		0,
+		creq.size,
+		PROT_READ | PROT_WRITE,
+		MAP_SHARED,
+		dev->fd,
+		mreq.offset);
+	assert(dev->buf[n].map != MAP_FAILED);
+
+	memset(dev->buf[n].map, 0, dev->buf[n].size);
 }
 
 struct drm_device *drm_init(const char *name)
@@ -142,47 +186,8 @@ struct drm_device *drm_init(const char *name)
 	}
 */
 
-	{
-		struct drm_mode_create_dumb creq = { 0 };
-		creq.width = mode.hdisplay;
-		creq.height = mode.vdisplay;
-		creq.bpp = 32;
-		int res = drmIoctl(dev.fd, DRM_IOCTL_MODE_CREATE_DUMB, &creq);
-		assert(res >= 0);
-
-		dev.buf.width = creq.width;
-		dev.buf.height = creq.height;
-		dev.buf.stride = creq.pitch;
-		dev.buf.size = creq.size;
-		dev.buf.handle = creq.handle;
-
-		res = drmModeAddFB(
-			dev.fd,
-			creq.width,
-			creq.height,
-			24,
-			32,
-			creq.pitch,
-			creq.handle,
-			&dev.buf.fb);
-		assert(res == 0);
-
-		struct drm_mode_map_dumb mreq = { 0 };
-		mreq.handle = creq.handle;
-		res = drmIoctl(dev.fd, DRM_IOCTL_MODE_MAP_DUMB, &mreq);
-		assert(res == 0);
-
-		dev.buf.map = mmap(
-			0,
-			creq.size,
-			PROT_READ | PROT_WRITE,
-			MAP_SHARED,
-			dev.fd,
-			mreq.offset);
-		assert(dev.buf.map != MAP_FAILED);
-
-		memset(dev.buf.map, 0, dev.buf.size);
-	}
+	drm_create_buf(&dev, 0);
+	drm_create_buf(&dev, 1);
 
 	dev.crtc = drmModeGetCrtc(dev.fd, dev.crtc_id);
 	assert(dev.crtc);
@@ -196,11 +201,11 @@ void drm_deinit(struct drm_device *dev)
 
 	drmModeFreeCrtc(dev->crtc);
 
-	{
-		munmap(dev->buf.map, dev->buf.size);
-		drmModeRmFB(dev->fd, dev->buf.fb);
+	for (int i = 0; i < sizeof(dev->buf) / sizeof(struct drm_buf); i++) {
+		munmap(dev->buf[i].map, dev->buf[i].size);
+		drmModeRmFB(dev->fd, dev->buf[i].fb);
 		struct drm_mode_destroy_dumb dreq = { 0 };
-		dreq.handle = dev->buf.handle;
+		dreq.handle = dev->buf[i].handle;
 		drmIoctl(dev->fd, DRM_IOCTL_MODE_DESTROY_DUMB, &dreq);
 	}
 
@@ -223,11 +228,13 @@ void page_flip_handler(
 {
 	struct drm_device *dev = (struct drm_device *)user_data;
 
-	drm_colorize(dev);
+	dev->front_buf ^= 1;
+
+	drm_colorize(dev, dev->front_buf);
 	drmModePageFlip(
 		dev->fd,
 		dev->crtc_id,
-		dev->buf.fb,
+		dev->buf[dev->front_buf].fb,
 		DRM_MODE_PAGE_FLIP_EVENT,
 		dev);
 }
@@ -251,7 +258,7 @@ int main(int argc, char *argv[])
 	int res = drmModeSetCrtc(
 		dev->fd,
 		dev->crtc_id,
-		dev->buf.fb,
+		dev->buf[dev->front_buf].fb,
 		0,
 		0,
 		&dev->connector->connector_id,
@@ -259,11 +266,11 @@ int main(int argc, char *argv[])
 		dev->mode);
 	assert(res == 0);
 
-	drm_colorize(dev);
+	drm_colorize(dev, dev->front_buf);
 	drmModePageFlip(
 		dev->fd,
 		dev->crtc_id,
-		dev->buf.fb,
+		dev->buf[dev->front_buf].fb,
 		DRM_MODE_PAGE_FLIP_EVENT,
 		dev);
 
@@ -279,6 +286,7 @@ int main(int argc, char *argv[])
 	const long double nsec = 1000000000;
 	struct timespec t1, t2;
 	clock_gettime(CLOCK_MONOTONIC, &t1);
+	uint32_t f = 0;
 
 	while (1) {
 		FD_SET(0, &fds);
@@ -297,9 +305,18 @@ int main(int argc, char *argv[])
 			clock_gettime(CLOCK_MONOTONIC, &t2);
 			long double e1 = t2.tv_sec - t1.tv_sec + (t2.tv_nsec - t1.tv_nsec) / nsec;
 			long double e2 = t2.tv_sec - t3.tv_sec + (t2.tv_nsec - t3.tv_nsec) / nsec;
-			fprintf(stdout, "%.9Lf, %.9Lf        \r", e1, 1 / e2);
+			fprintf(
+				stdout,
+				"F: %d, E: %.9Lf, A: %.9Lf, B: %d, C: %.9Lf        \r",
+				f,
+				e1,
+				f / e1,
+				dev->front_buf,
+				1 / e2);
 			fflush(stdout);
 		}
+
+		++f;
 	}
 
 	res = drmModeSetCrtc(
