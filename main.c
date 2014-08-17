@@ -186,8 +186,8 @@ struct drm_device *drm_init(const char *name)
 	}
 */
 
-	drm_create_buf(&dev, 0);
-	drm_create_buf(&dev, 1);
+	for (int i = 0; i < sizeof(dev.buf) / sizeof(struct drm_buf); i++)
+		drm_create_buf(&dev, i);
 
 	dev.crtc = drmModeGetCrtc(dev.fd, dev.crtc_id);
 	assert(dev.crtc);
