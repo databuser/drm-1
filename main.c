@@ -45,6 +45,7 @@ struct egl_data {
 
 struct gl_data {
 	GLuint program;
+	GLvoid *planes[3];
 	struct egl_data *egl;
 };
 
@@ -175,52 +176,72 @@ void drm_uninit(struct drm_data *drm)
 
 void gl_draw(struct gl_data *gl)
 {
-	{
-		static uint8_t d1 = 0, d2 = 1;
-		static GLfloat
-			r = 1.0,
-			g = 0.0,
-			b = 0.0,
-			y = 1.0;
-
-		if (!d1) {
-			r -= 0.001;
-			y -= 0.001;
-			if (r <= 0)
-				d1 ^= 1;
-		}
-		else {
-			r += 0.001;
-			y += 0.001;
-			if (r >= 1)
-				d1 ^= 1;
-		}
-
-		if (!d2) {
-			g -= 0.001;
-			b -= 0.001;
-			if (b <= 0)
-				d2 ^= 1;
-		}
-		else {
-			g += 0.001;
-			b += 0.001;
-			if (b >= 1)
-				d2 ^= 1;
-		}
-
-		const GLfloat colors[] = {
-			  r, 0.0, 0.0, 0.0,   g, 0.0,
-			0.0, 0.0,   b,   y,   y, 0.0,
-		};
-
-		GLint color = glGetAttribLocation(gl->program, "a_color");
-		glVertexAttribPointer(color, 3, GL_FLOAT, GL_FALSE, 0, (GLvoid *)&colors[0]);
-		glEnableVertexAttribArray(color);
-	}
-
 	glClearColor(0.0, 0.0, 0.0, 1.0);
 	glClear(GL_COLOR_BUFFER_BIT);
+
+	GLuint textures[3];
+	glGenTextures(3, textures);
+
+	// Y
+	GLint u_texture_y = glGetUniformLocation(gl->program, "u_texture_y");
+	glUniform1i(u_texture_y, 0);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, u_texture_y);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexImage2D(
+		GL_TEXTURE_2D,
+		0,
+		GL_LUMINANCE,
+		1920,
+		1080,
+		0,
+		GL_LUMINANCE,
+		GL_UNSIGNED_BYTE,
+		(GLvoid *)gl->planes[0]);
+
+	// U
+	GLint u_texture_u = glGetUniformLocation(gl->program, "u_texture_u");
+	glUniform1i(u_texture_u, 1);
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_2D, u_texture_u);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexImage2D(
+		GL_TEXTURE_2D,
+		0,
+		GL_LUMINANCE,
+		1920 / 2,
+		1080 / 2,
+		0,
+		GL_LUMINANCE,
+		GL_UNSIGNED_BYTE,
+		(GLvoid *)gl->planes[1]);
+
+	// V
+	GLint u_texture_v = glGetUniformLocation(gl->program, "u_texture_v");
+	glUniform1i(u_texture_v, 2);
+	glActiveTexture(GL_TEXTURE2);
+	glBindTexture(GL_TEXTURE_2D, u_texture_v);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexImage2D(
+		GL_TEXTURE_2D,
+		0,
+		GL_LUMINANCE,
+		1920 / 2,
+		1080 / 2,
+		0,
+		GL_LUMINANCE,
+		GL_UNSIGNED_BYTE,
+		(GLvoid *)gl->planes[2]);
+
+	glViewport(
+		0,
+		0,
+		gl->egl->gbm->drm->mode->hdisplay,
+		gl->egl->gbm->drm->mode->vdisplay);
+
 	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 }
 
@@ -231,6 +252,7 @@ void page_flip_handler(
 	unsigned int tv_usec,
 	void *user_data)
 {
+return;
 	struct gbm_drm_data *gbm_drm = (struct gbm_drm_data *)user_data;
 	assert(gbm_drm);
 
@@ -266,7 +288,7 @@ struct gbm_data *gbm_init(struct drm_data *drm)
 	return &gbm;
 }
 
-GLuint gl_load_shader(GLenum type, const char *source)
+GLuint gl_compile_shader(GLenum type, const char *source)
 {
 	GLuint shader = glCreateShader(type);
 	assert(shader);
@@ -281,12 +303,35 @@ GLuint gl_load_shader(GLenum type, const char *source)
 	return shader;
 }
 
+GLuint gl_link_program(GLuint vertex_shader, GLuint fragment_shader)
+{
+	GLuint program = glCreateProgram();
+	assert(program);
+
+	glAttachShader(program, vertex_shader);
+	glAttachShader(program, fragment_shader);
+
+	glDeleteShader(vertex_shader);
+	glDeleteShader(fragment_shader);
+
+	glLinkProgram(program);
+
+	GLint linked;
+	glGetProgramiv(program, GL_LINK_STATUS, &linked);
+	assert(linked);
+
+	glUseProgram(program);
+	glDeleteProgram(program);
+
+	return program;
+}
+
 GLfloat *gl_get_vertices(double wv, double hv)
 {
 	static GLfloat vertices[8];
 
 	static const double wp = 1920;
-	static const double hp = 840;
+	static const double hp = 1080;
 
 	double w = 2, h = 2, wr = wp / wv, hr = hp / hv;
 	if (wr > hr)
@@ -382,69 +427,170 @@ struct gl_data *gl_init(struct egl_data *egl)
 	static struct gl_data gl = { 0 };
 
 	static const GLchar vertex_shader_source[] =
-		"attribute vec4 a_position;           "
-		"attribute vec3 a_color;              "
-		"varying vec3 v_color;                "
-		"                                     "
-		"void main() {                        "
-		"  gl_Position = a_position;          "
-		"  v_color = a_color;                 "
-		"}                                    ";
+		"attribute vec4 a_position;                                 "
+		"attribute vec2 a_coordinates;                              "
+		"varying vec2 v_coordinates;                                "
+		"                                                           "
+		"void main() {                                              "
+		"  v_coordinates = a_coordinates;                           "
+		"  gl_Position = a_position;                                "
+		"}                                                          ";
 
 	static const GLchar fragment_shader_source[] =
-		"precision mediump float;             "
-		"varying vec3 v_color;                "
-		"                                     "
-		"void main() {                        "
-		"  gl_FragColor = vec4(v_color, 1.0); "
-		"}                                    ";
+		"precision highp float;                                     "
+		"uniform sampler2D u_texture_y;                             "
+		"uniform sampler2D u_texture_u;                             "
+		"uniform sampler2D u_texture_v;                             "
+		"varying vec2 v_coordinates;                                "
+		"uniform mat3 u_yuv_to_rgb;                                 "
+		"                                                           "
+		"void main() {                                              "
+		"  float y = texture2D(u_texture_y, v_coordinates).r;       "
+		"  float u = texture2D(u_texture_u, v_coordinates).r - 0.5; "
+		"  float v = texture2D(u_texture_v, v_coordinates).r - 0.5; "
+		"  vec3 rgb = u_yuv_to_rgb * vec3(y, u, v);                 "
+		"  gl_FragColor = vec4(rgb, 1.0);                           "
+		"}                                                          ";
 
-	GLuint vertex_shader = gl_load_shader(GL_VERTEX_SHADER, vertex_shader_source);
+	GLuint vertex_shader = gl_compile_shader(GL_VERTEX_SHADER, vertex_shader_source);
 	assert(vertex_shader != -1);
 
-	GLuint fragment_shader = gl_load_shader(GL_FRAGMENT_SHADER, fragment_shader_source);
+	GLuint fragment_shader = gl_compile_shader(GL_FRAGMENT_SHADER, fragment_shader_source);
 	assert(fragment_shader != -1);
 
-	GLuint program = glCreateProgram();
-
-	glAttachShader(program, vertex_shader);
-	glAttachShader(program, fragment_shader);
+	GLuint program = gl_link_program(vertex_shader, fragment_shader);
 
 	{
-		glLinkProgram(program);
-		GLint linked;
-		glGetProgramiv(program, GL_LINK_STATUS, &linked);
-		assert(linked);
-	}
-
-	glUseProgram(program);
-
-	{
-/*
-		static const GLfloat vertices[] = {
-			-1.0,  1.0,  1.0,  1.0,
-			-1.0, -1.0,  1.0, -1.0,
-		};
-*/
 		GLfloat *vertices = gl_get_vertices(
 			egl->gbm->drm->mode->hdisplay,
 			egl->gbm->drm->mode->vdisplay);
 
-		GLint position = glGetAttribLocation(program, "a_position");
-//		glVertexAttribPointer(position, 2, GL_FLOAT, GL_FALSE, 0, (GLvoid *)&vertices[0]);
-		glVertexAttribPointer(position, 2, GL_FLOAT, GL_FALSE, 0, (GLvoid *)vertices);
-		glEnableVertexAttribArray(position);
+		GLint a_position = glGetAttribLocation(program, "a_position");
+		glVertexAttribPointer(a_position, 2, GL_FLOAT, GL_FALSE, 0, vertices);
+		glEnableVertexAttribArray(a_position);
 	}
 
 	{
-		static const GLfloat colors[] = {
-			1.0, 0.0, 0.0, 0.0, 1.0, 0.0,
-			0.0, 0.0, 1.0, 1.0, 1.0, 0.0,
+		static GLfloat coordinates[] = {
+			0, 0, 1, 0,
+			0, 1, 1, 1,
 		};
 
-		GLint color = glGetAttribLocation(program, "a_color");
-		glVertexAttribPointer(color, 3, GL_FLOAT, GL_FALSE, 0, (GLvoid *)&colors[0]);
-		glEnableVertexAttribArray(color);
+		GLint a_coordinates = glGetAttribLocation(program, "a_coordinates");
+		glVertexAttribPointer(a_coordinates, 2, GL_FLOAT, GL_FALSE, 0, coordinates);
+		glEnableVertexAttribArray(a_coordinates);
+	}
+
+	{
+		const GLfloat yuv_to_rgb[] = {
+			//  B       G       R
+			1.000,  1.000,  1.000, // Y
+			1.772, -0.344,  0.000, // V
+			0.000, -0.714,  1.402, // U
+		};
+
+		glUniformMatrix3fv(
+			glGetUniformLocation(program, "u_yuv_to_rgb"),
+			1,
+			GL_FALSE,
+			(GLfloat *)&yuv_to_rgb[0]);
+
+		int w = 1920, h = 1080; // frame.yuv
+		int y = w * h;
+		int v = y / 4;
+		int u = v;
+
+		GLvoid *planes[] = {
+			(GLvoid *)malloc(y),
+			(GLvoid *)malloc(u),
+			(GLvoid *)malloc(v),
+		};
+
+		gl.planes[0] = planes[0];
+		gl.planes[1] = planes[1];
+		gl.planes[2] = planes[2];
+
+		{
+			FILE *fp = fopen("frame.yuv", "rb");
+
+			fseek(fp, 0, SEEK_END);
+			int fs = ftell(fp);
+			int frame_size = y + u + v;
+
+			fseek(fp, fs % frame_size, SEEK_SET);
+			fread(planes[0], y, 1, fp);
+			fread(planes[2], v, 1, fp);
+			fread(planes[1], u, 1, fp);
+
+			fclose(fp);
+		}
+
+		GLuint textures[3];
+		glGenTextures(3, textures);
+
+		// Y
+		GLint u_texture_y = glGetUniformLocation(program, "u_texture_y");
+		glUniform1i(u_texture_y, 0);
+		glActiveTexture(GL_TEXTURE0);
+		glBindTexture(GL_TEXTURE_2D, u_texture_y);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glTexImage2D(
+			GL_TEXTURE_2D,
+			0,
+			GL_LUMINANCE,
+			w,
+			h,
+			0,
+			GL_LUMINANCE,
+			GL_UNSIGNED_BYTE,
+			(GLvoid *)planes[0]);
+
+		// U
+		GLint u_texture_u = glGetUniformLocation(program, "u_texture_u");
+		glUniform1i(u_texture_u, 1);
+		glActiveTexture(GL_TEXTURE1);
+		glBindTexture(GL_TEXTURE_2D, u_texture_u);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glTexImage2D(
+			GL_TEXTURE_2D,
+			0,
+			GL_LUMINANCE,
+			w / 2,
+			h / 2,
+			0,
+			GL_LUMINANCE,
+			GL_UNSIGNED_BYTE,
+			(GLvoid *)planes[1]);
+
+		// V
+		GLint u_texture_v = glGetUniformLocation(program, "u_texture_v");
+		glUniform1i(u_texture_v, 2);
+		glActiveTexture(GL_TEXTURE2);
+		glBindTexture(GL_TEXTURE_2D, u_texture_v);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glTexImage2D(
+			GL_TEXTURE_2D,
+			0,
+			GL_LUMINANCE,
+			w / 2,
+			h / 2,
+			0,
+			GL_LUMINANCE,
+			GL_UNSIGNED_BYTE,
+			(GLvoid *)planes[2]);
+/*
+		free(planes[2]);
+		free(planes[1]);
+		free(planes[0]);
+*/
+		glViewport(
+			0,
+			0,
+			egl->gbm->drm->mode->hdisplay,
+			egl->gbm->drm->mode->vdisplay);
 	}
 
 	gl.program = program;
