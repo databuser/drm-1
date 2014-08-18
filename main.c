@@ -176,7 +176,6 @@ void drm_uninit(struct drm_data *drm)
 
 void gl_draw(struct gl_data *gl)
 {
-	glClearColor(0.0, 0.0, 0.0, 1.0);
 	glClear(GL_COLOR_BUFFER_BIT);
 	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 }
@@ -188,7 +187,6 @@ void page_flip_handler(
 	unsigned int tv_usec,
 	void *user_data)
 {
-return;
 	struct gbm_drm_data *gbm_drm = (struct gbm_drm_data *)user_data;
 	assert(gbm_drm);
 
@@ -379,30 +377,30 @@ struct gl_data *gl_init(struct egl_data *egl)
 	static struct gl_data gl = { 0 };
 
 	static const GLchar vertex_shader_source[] =
-		"attribute vec4 a_position;                                  "
-		"attribute vec2 a_coordinates;                               "
-		"varying vec2 v_coordinates;                                 "
-		"                                                            "
-		"void main() {                                               "
-		"  v_coordinates = a_coordinates;                            "
-		"  gl_Position = a_position;                                 "
-		"}                                                           ";
+		"attribute vec4 a_position;                                    "
+		"attribute vec2 a_coordinates;                                 "
+		"varying vec2 v_coordinates;                                   "
+		"                                                              "
+		"void main() {                                                 "
+		"  v_coordinates = a_coordinates;                              "
+		"  gl_Position = a_position;                                   "
+		"}                                                             ";
 
 	static const GLchar fragment_shader_source[] =
-		"precision highp float;                                      "
-		"uniform sampler2D u_texture_y;                              "
-		"uniform sampler2D u_texture_u;                              "
-		"uniform sampler2D u_texture_v;                              "
-		"varying vec2 v_coordinates;                                 "
-		"uniform mat3 u_yuv_to_rgb;                                  "
-		"                                                            "
-		"void main() {                                               "
-		"  float y = texture2D(u_texture_y, v_coordinates).r - 0.06; "
-		"  float u = texture2D(u_texture_u, v_coordinates).r - 0.5;  "
-		"  float v = texture2D(u_texture_v, v_coordinates).r - 0.5;  "
-		"  vec3 rgb = u_yuv_to_rgb * vec3(y, u, v);                  "
-		"  gl_FragColor = vec4(rgb, 1.0);                            "
-		"}                                                           ";
+		"precision highp float;                                        "
+		"uniform sampler2D u_texture_y;                                "
+		"uniform sampler2D u_texture_u;                                "
+		"uniform sampler2D u_texture_v;                                "
+		"varying vec2 v_coordinates;                                   "
+		"uniform mat3 u_yuv_to_rgb;                                    "
+		"                                                              "
+		"void main() {                                                 "
+		"  float y = texture2D(u_texture_y, v_coordinates).r - 0.0625; " // y - 16
+		"  float u = texture2D(u_texture_u, v_coordinates).r - 0.5;    " // u - 128
+		"  float v = texture2D(u_texture_v, v_coordinates).r - 0.5;    " // v - 128
+		"  vec3 rgb = u_yuv_to_rgb * vec3(y, u, v);                    "
+		"  gl_FragColor = vec4(rgb, 1.0);                              "
+		"}                                                             ";
 
 	GLuint vertex_shader = gl_compile_shader(GL_VERTEX_SHADER, vertex_shader_source);
 	assert(vertex_shader != -1);
@@ -413,8 +411,8 @@ struct gl_data *gl_init(struct egl_data *egl)
 	GLuint program = gl_link_program(vertex_shader, fragment_shader);
 
 	// view (implicit aspect)
-	const int wv = 1920;
-	const int hv = 1080;
+	const int wv = egl->gbm->drm->mode->hdisplay;
+	const int hv = egl->gbm->drm->mode->vdisplay;
 	// texture
 	const int wt = 1920;
 	const int ht = 1080;
@@ -470,12 +468,36 @@ struct gl_data *gl_init(struct egl_data *egl)
 	}
 
 	{
+		// ITU-R BT.601, RGB full range (precision 6)
+		const GLfloat yuv_to_rgb[] = {
+			//     B          G          R
+			1.164383,  1.164383,  1.164383, // Y
+			2.017232, -0.391762,  0.000000, // V
+			0.000000, -0.812968,  1.596027, // U
+		};
+/*
+		// ITU-R BT.601, RGB full range (precision 3)
+		const GLfloat yuv_to_rgb[] = {
+			//  B       G       R
+			1.164,  1.164,  1.164, // Y
+			2.017, -0.392,  0.000, // V
+			0.000, -0.813,  1.596, // U
+		};
+		// ITU-R BT.601, RGB limited range
 		const GLfloat yuv_to_rgb[] = {
 			//  B       G       R
 			1.000,  1.000,  1.000, // Y
 			1.772, -0.344,  0.000, // V
 			0.000, -0.714,  1.402, // U
 		};
+		// ITU-R BT.709, RGB limited range
+		const GLfloat yuv_to_rgb[] = {
+			//  B       G       R
+			1.000,  1.000,  1.000, // Y
+			1.856, -0.187,  0.000, // V
+			0.000, -0.467,  1.570, // U
+		};
+*/
 
 		glUniformMatrix3fv(
 			glGetUniformLocation(program, "u_yuv_to_rgb"),
@@ -512,9 +534,6 @@ struct gl_data *gl_init(struct egl_data *egl)
 
 			fclose(fp);
 		}
-
-		GLuint textures[3];
-		glGenTextures(3, textures);
 
 		// Y
 		GLint u_texture_y = glGetUniformLocation(program, "u_texture_y");
@@ -569,16 +588,12 @@ struct gl_data *gl_init(struct egl_data *egl)
 			GL_LUMINANCE,
 			GL_UNSIGNED_BYTE,
 			(GLvoid *)planes[2]);
-/*
+
 		free(planes[2]);
 		free(planes[1]);
 		free(planes[0]);
-*/
-		glViewport(
-			0,
-			0,
-			egl->gbm->drm->mode->hdisplay,
-			egl->gbm->drm->mode->vdisplay);
+
+		glClearColor(0.0, 0.0, 0.0, 1.0);
 	}
 
 	gl.program = program;
