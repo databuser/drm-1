@@ -469,6 +469,7 @@ struct gl_data *gl_init(struct egl_data *egl)
 
 	{
 		// ITU-R BT.601, RGB full range (precision 6)
+		// http://msdn.microsoft.com/en-us/library/windows/desktop/dd206750(v=vs.85).aspx#converting8bityuvtorgb888
 		const GLfloat yuv_to_rgb[] = {
 			//     B          G          R
 			1.164383,  1.164383,  1.164383, // Y
